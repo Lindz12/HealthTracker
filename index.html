@@ -59,6 +59,8 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .stitle{font-weight:700}
 .sbody{color:var(--muted);font-size:14px}
 .sbody div+div{margin-top:2px}
+.cloudrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.cloudrow input{flex:1 1 160px;min-width:0;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--card)}
 .chip{border-radius:99px;font-size:13px;padding:5px 14px;text-align:left}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.danger{color:var(--bad)}
@@ -146,13 +148,13 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
     <p class="note">Used for BMI and for the suggested calorie and protein targets. Click the heading to collapse.</p>
     <div class="form" id="profileForm"></div>
     <div class="actions">
-      <button id="sample">Load sample data</button>
       <button id="viewSheet">View in spreadsheet</button>
       <button id="export">Export backup</button>
       <button id="importBtn">Import backup</button>
       <input type="file" id="importFile" accept="application/json" hidden>
       <button id="reset" class="danger">Erase all data</button>
-    </div>  </details>
+    </div>
+    <div id="cloudBox"></div>  </details>
   <section id="cards" class="cards" aria-label="Weekly summary"></section>
 
   <section class="panel">
@@ -209,10 +211,14 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
   <div class="sheetbody"><table id="sheetTable"></table></div>
 </dialog>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 (function(){
 'use strict';
 const KEY='weeklyHealthTracker.v1';
+/* ---- Supabase settings: paste your project's values here (see README) ---- */
+const SUPABASE_URL='https://fociporfchsprcvbheye.supabase.co/rest/v1/';      // e.g. 'https://abcdefghijkl.supabase.co'
+const SUPABASE_ANON_KEY='sb_publishable_2LCn9nB1RUhvq04YO75jOA_qGC8AonE'; // the "anon public" / publishable key. NEVER the service_role / secret key.
 const LB=2.20462;
 const $=(s,r=document)=>r.querySelector(s);
 const isNum=v=>typeof v==='number'&&isFinite(v);
@@ -251,8 +257,113 @@ function pushDb(){
       .catch(()=>dbStatus('⚠ Could not save to SQL — is server.py still running?','bad'));
   },400);
 }
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){storageOK=false;renderBanner()}pushDb()}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){storageOK=false;renderBanner()}pushDb();cloudQueue()}
+
+/* ---------- Supabase cloud sync ---------- */
+const SYNC_KEY=KEY+'.synced';
+let sb=null,sbUser=null,synced=null,sbTimer=null,sbBusy=false,sbAgain=false;
+const cloudConfigured=()=>!!(SUPABASE_URL&&SUPABASE_ANON_KEY);
+const nn=v=>isNum(v)?v:null;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function snapshot(st){
+  const o={days:{},targets:{},profile:JSON.stringify(st.profile)};
+  for(const d in st.days)o.days[d]=JSON.stringify(st.days[d]);
+  for(const w in st.targets)o.targets[w]=JSON.stringify(st.targets[w]);
+  return o;
+}
+function saveSynced(){try{synced?localStorage.setItem(SYNC_KEY,JSON.stringify(synced)):localStorage.removeItem(SYNC_KEY)}catch(e){}}
+function cloudQueue(){if(!sbUser||!synced)return;clearTimeout(sbTimer);dbStatus('Saving to Supabase…');sbTimer=setTimeout(cloudFlush,800)}
+async function cloudFlush(){
+  if(!sbUser||!synced)return;
+  if(sbBusy){sbAgain=true;return}
+  sbBusy=true;
+  try{
+    const uid=sbUser.id,now=snapshot(S),stamp=new Date().toISOString(),chk=r=>{if(r.error)throw r.error};
+    const up=Object.keys(now.days).filter(d=>synced.days[d]!==now.days[d]);
+    const del=Object.keys(synced.days).filter(d=>!(d in now.days));
+    const tup=Object.keys(now.targets).filter(w=>synced.targets[w]!==now.targets[w]);
+    const tdel=Object.keys(synced.targets).filter(w=>!(w in now.targets));
+    if(up.length)chk(await sb.from('daily_log').upsert(up.map(d=>{const r=JSON.parse(now.days[d]);
+      return{user_id:uid,log_date:d,calories:nn(r.cal),protein_g:nn(r.pro),steps:nn(r.steps),weight_kg:nn(r.wt),updated_at:stamp}}),{onConflict:'user_id,log_date'}));
+    if(del.length)chk(await sb.from('daily_log').delete().eq('user_id',uid).in('log_date',del));
+    if(tup.length)chk(await sb.from('weekly_targets').upsert(tup.map(w=>{const r=JSON.parse(now.targets[w]);
+      return{user_id:uid,week_start:w,calories:nn(r.cal),protein_g:nn(r.pro),steps:nn(r.steps)}}),{onConflict:'user_id,week_start'}));
+    if(tdel.length)chk(await sb.from('weekly_targets').delete().eq('user_id',uid).in('week_start',tdel));
+    if(now.profile!==synced.profile)chk(await sb.from('profile').upsert({user_id:uid,data:JSON.parse(now.profile),updated_at:stamp},{onConflict:'user_id'}));
+    synced=now;saveSynced();
+    dbStatus('✓ Synced with Supabase','ok');
+  }catch(e){dbStatus('⚠ Not synced yet ('+(e.message||e)+'). Entries are safe on this device and will sync on your next change.','bad')}
+  finally{sbBusy=false;if(sbAgain){sbAgain=false;cloudFlush()}}
+}
+async function fetchAll(table,cols){
+  let out=[],from=0;
+  for(;;){
+    const r=await sb.from(table).select(cols).range(from,from+999);
+    if(r.error)throw r.error;
+    out=out.concat(r.data);
+    if(r.data.length<1000)return out;
+    from+=1000;
+  }
+}
+async function cloudLoad(){
+  if(!sbUser)return;
+  dbStatus('Loading from Supabase…');
+  try{
+    const [days,tg,pr]=await Promise.all([
+      fetchAll('daily_log','log_date,calories,protein_g,steps,weight_kg'),
+      fetchAll('weekly_targets','week_start,calories,protein_g,steps'),
+      sb.from('profile').select('data').maybeSingle()]);
+    if(pr.error)throw pr.error;
+    const pack=pairs=>{const o={};pairs.forEach(([k,v])=>{if(v!=null&&isFinite(Number(v)))o[k]=Number(v)});return o};
+    const SV={profile:Object.assign(fresh().profile,(pr.data&&pr.data.data)||{}),days:{},targets:{}};
+    days.forEach(r=>{const o=pack([['cal',r.calories],['pro',r.protein_g],['steps',r.steps],['wt',r.weight_kg]]);if(Object.keys(o).length)SV.days[r.log_date]=o});
+    tg.forEach(r=>{const o=pack([['cal',r.calories],['pro',r.protein_g],['steps',r.steps]]);if(Object.keys(o).length)SV.targets[r.week_start]=o});
+    let prev=null;try{prev=JSON.parse(localStorage.getItem(SYNC_KEY))}catch(e){}
+    if(!days.length&&!tg.length&&!pr.data){
+      synced={days:{},targets:{},profile:''};          // empty account: upload what is on this device
+    }else{
+      synced=snapshot(SV);
+      if(prev&&prev.days){                             // keep edits made here that never reached Supabase
+        const loc=snapshot(S);
+        for(const d in loc.days)if(prev.days[d]!==loc.days[d])SV.days[d]=S.days[d];
+        for(const d in prev.days)if(!(d in loc.days))delete SV.days[d];
+        for(const w in loc.targets)if((prev.targets||{})[w]!==loc.targets[w])SV.targets[w]=S.targets[w];
+        for(const w in (prev.targets||{}))if(!(w in loc.targets))delete SV.targets[w];
+        if(prev.profile!==loc.profile)SV.profile=S.profile;
+      }
+      S=SV;
+    }
+    try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}
+    saveSynced();renderProfile();renderAll();
+    await cloudFlush();
+  }catch(e){dbStatus('⚠ Could not load from Supabase ('+(e.message||e)+'). Showing the entries saved on this device.','bad')}
+}
+function renderCloud(){
+  const el=$('#cloudBox');
+  if(!cloudConfigured()){el.innerHTML='';return}
+  if(!sb){el.innerHTML='<p class="note">☁️ Cloud sync is unavailable right now (offline?). Entries are saved on this device.</p>';return}
+  if(sbUser){el.innerHTML='<div class="cloudrow"><span>☁️ Syncing with Supabase as <b>'+esc(sbUser.email||'')+'</b></span><button data-c="sync">Sync now</button><button data-c="out">Sign out</button></div>';return}
+  el.innerHTML='<div class="cloudrow"><b>☁️ Sign in to sync</b>'+
+    '<input id="sbEmail" type="email" autocomplete="username" placeholder="Email" aria-label="Email">'+
+    '<input id="sbPass" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">'+
+    '<button class="primary" data-c="in">Sign in</button><button data-c="up">Create account</button></div><p class="note" id="sbMsg"></p>';
+}
+function cloudInit(){
+  if(!window.supabase){renderCloud();dbStatus('Could not reach Supabase. Entries are saved on this device.','warn');return}
+  sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+  dbStatus('Sign in under Profile & data to sync with Supabase. Entries are saved on this device.','warn');
+  sb.auth.onAuthStateChange((ev,session)=>{
+    const u=session?session.user:null,changed=(u&&u.id)!==(sbUser&&sbUser.id);
+    sbUser=u;renderCloud();
+    if(!changed)return;
+    if(u)setTimeout(cloudLoad,0);
+    else{synced=null;saveSynced();dbStatus('Signed out. Entries are saved on this device only.','warn')}
+  });
+  renderCloud();
+}
+window.addEventListener('online',()=>{if(sbUser)cloudFlush()});
 function initDb(){
+  if(cloudConfigured()){cloudInit();return}
   const local=/^https?:$/.test(location.protocol)&&/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   if(!local){dbStatus(storageOK?'✓ Saved on this device':'⚠ Browser storage is off, so entries will not be kept',storageOK?'ok':'bad');return}
   fetch('/api/data').then(r=>{if(!r.ok)throw 0;return r.json()}).then(j=>{
@@ -689,21 +800,6 @@ $('#profileForm').addEventListener('change',e=>{
   else if(id==='pf-goalwt'){const n=Number(v);if(v.trim()==='')delete p.goalWt;else if(n>0)p.goalWt=toKg(n)}
   p.set=true;save();renderProfile();renderAll();
 });
-$('#sample').onclick=()=>{
-  if(Object.keys(S.days).length&&!confirm('This replaces your current entries with sample data. Continue?'))return;
-  const today=todayISO(),start=addDays(weekStart(today),-35);
-  S.days={};S.targets={};
-  Object.assign(S.profile,{sex:'male',age:34,heightCm:178,activity:1.375,goal:'lose',rate:0.5,goalWt:76,set:true});
-  let seed=7;const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;
-  let i=0;
-  for(let d=start;d<=today;d=addDays(d,1),i++){
-    const we=[0,6].includes(parse(d).getDay());
-    const r={cal:Math.round(1950+rnd()*500+(we?220:0)),pro:Math.round(100+rnd()*55),steps:Math.round(5500+rnd()*5500-(we?800:0))};
-    if(rnd()>.15)r.wt=+(84-i*0.07+(rnd()-.5)*.8).toFixed(1);
-    S.days[d]=r;
-  }
-  save();renderProfile();renderAll();
-};
 $('#export').onclick=()=>{
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(S,null,2)],{type:'application/json'}));
@@ -767,9 +863,26 @@ $('#importFile').onchange=e=>{
   r.readAsText(f);e.target.value='';
 };
 $('#reset').onclick=()=>{
-  if(!confirm('Erase all entries, targets and profile? This cannot be undone.'))return;
+  if(!confirm('Erase all entries, targets and profile?'+(sbUser?' This also erases them from Supabase.':'')+' This cannot be undone.'))return;
   S=fresh();save();renderProfile();renderAll();
 };
+$('#cloudBox').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-c]');if(!b||!sb)return;
+  const c=b.dataset.c,msg=t=>{const m=$('#sbMsg');if(m)m.textContent=t};
+  if(c==='sync'){cloudLoad();return}
+  if(c==='out'){await sb.auth.signOut();return}
+  const email=$('#sbEmail').value.trim(),password=$('#sbPass').value;
+  if(!email||password.length<6){msg('Enter your email and a password of at least 6 characters.');return}
+  b.disabled=true;msg(c==='in'?'Signing in…':'Creating account…');
+  try{
+    if(c==='in'){const {error}=await sb.auth.signInWithPassword({email,password});if(error)msg(error.message)}
+    else{
+      const {data,error}=await sb.auth.signUp({email,password,options:{emailRedirectTo:location.origin+location.pathname}});
+      msg(error?error.message:data.session?'Account created. You are signed in.':'Account created. Open the confirmation email, tap the link, then sign in here.');
+    }
+  }catch(err){msg('Could not reach Supabase: '+(err.message||err))}
+  b.disabled=false;
+});
 
 renderProfile();renderAll();initDb();
 })();
