@@ -82,7 +82,11 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .danger-zone{border:1px solid color-mix(in srgb,var(--bad) 40%,var(--line));border-radius:12px;padding:12px;background:color-mix(in srgb,var(--bad) 5%,var(--card))}
 button.danger{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
 .welcome .actions{margin-top:6px}
-.locked-note{opacity:.55;pointer-events:none}
+body.is-locked main,body.is-locked .weeknav,body.is-locked #profileChip,body.is-locked #syncBtn{display:none}
+body.is-locked .authdlg::backdrop{background:var(--bg)}
+.gatebrand{display:none}
+body.is-locked .gatebrand{display:block;text-align:center;margin:4px 0 2px}
+.gatebrand h2{font:700 24px/1.2 Georgia,"Times New Roman",serif;color:var(--wt);margin:0 0 4px}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.danger{color:var(--bad)}
 .top{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px max(16px,env(safe-area-inset-right)) 10px max(16px,env(safe-area-inset-left));padding-top:max(10px,env(safe-area-inset-top));display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
@@ -257,7 +261,8 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 <dialog id="authDlg" class="authdlg" aria-label="Sign in">
   <div class="sheethead"><strong id="authTitle">☁️ Sign in</strong><span style="flex:1"></span><button type="button" id="authClose" class="iconbtn" aria-label="Close">✕</button></div>
   <form id="authForm" class="authbody" novalidate>
-    <p class="note" style="margin-top:0">Your entries sync across all your devices. Only you can see them.</p>
+    <div class="gatebrand"><h2>Weekly Health Tracker</h2><div class="muted sm">Track calories, protein, steps and weight, week by week.</div></div>
+    <p class="note" style="margin-top:0">Sign in or create a free account. Your entries are private to you and sync across all your devices.</p>
     <label>Email<input id="sbEmail" type="email" inputmode="email" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     <label>Password<input id="sbPass" type="password" autocomplete="current-password"></label>
     <label>Your name <span class="muted">(only when creating an account)</span><input id="sbName" type="text" autocomplete="name" maxlength="40"></label>
@@ -357,7 +362,7 @@ function save(){if(locked())return;try{localStorage.setItem(KEY,JSON.stringify(S
 
 /* ---------- Supabase cloud sync ---------- */
 const SYNC_KEY=KEY+'.synced',UID_KEY=KEY+'.uid';
-let sb=null,sbUser=null,synced=null,sbTimer=null,sbBusy=false,sbAgain=false,cloudFailed=false;
+let sb=null,sbUser=null,synced=null,sbTimer=null,sbBusy=false,sbAgain=false,cloudFailed=false,authReady=false;
 const cloudConfigured=()=>CLOUD;
 // Locked = accounts are on but nobody is signed in: show an empty, read-only tracker.
 // (Exception: Supabase could not load at all, e.g. offline, for someone already signed in on this device.)
@@ -472,11 +477,18 @@ function cloudInit(){
   dbStatus('Sign in (top right) to see and log your entries.','warn');
   sb.auth.onAuthStateChange((ev,session)=>{
     const u=session?session.user:null,changed=(u&&u.id)!==(sbUser&&sbUser.id);
-    sbUser=u;renderCloud();
+    sbUser=u;authReady=true;renderCloud();
+    if(u&&$('#authDlg').open&&!$('#authForm').hidden)$('#authDlg').close();   // signed in: leave the sign-in screen
+    lockUI();
     if(!changed)return;
     if(u)setTimeout(cloudLoad,0);
     else{S=fresh();renderProfile();renderAll();dbStatus('Signed out. Sign in to see and log your entries.','warn')}
   });
+  // No saved sign-in on this device: nothing to wait for, show the sign-in screen now.
+  if(!hasSession()){authReady=true;lockUI()}
+  else setTimeout(()=>{if(!authReady){authReady=true;lockUI()}},5000);   // saved sign-in that never resolves
+  // Backup for the auth event: once Supabase confirms there is no session, show the sign-in screen.
+  sb.auth.getSession().then(({data})=>{if(!(data&&data.session)&&!sbUser){authReady=true;renderCloud();lockUI()}}).catch(()=>{authReady=true;lockUI()});
   renderCloud();
 }
 window.addEventListener('online',()=>{if(sbUser)cloudFlush()});
@@ -880,6 +892,10 @@ function lockUI(){
   const on=locked();
   document.querySelectorAll('#log input,#targets input,#targets button,#profileForm input,#profileForm select,#viewSheet').forEach(el=>{el.disabled=on});
   document.body.classList.toggle('is-locked',on);
+  // Signed out: the sign-in screen is the only thing shown, and it cannot be closed.
+  const dlg=$('#authDlg');
+  if(on&&sb&&authReady&&!dlg.open)openAccount();
+  $('#authClose').hidden=on;
 }
 function renderAll(){renderBanner();renderHeader();renderNav();renderCards();renderTable();renderTargets();renderTrends();lockUI()}
 function renderLive(){syncCurWt();renderTargets();renderCards();markProtein();renderFoot();renderTrends();lockUI()}
@@ -1016,7 +1032,8 @@ $('#acctOut').onclick=async()=>{
 $('#syncBtn').onclick=()=>{if(sbUser)cloudLoad()};
 $('#acctBtn').onclick=()=>{if(sb)openAccount()};
 document.addEventListener('click',e=>{if(e.target.closest('[data-open-auth]')&&sb)openAccount()});
-$('#authClose').onclick=()=>$('#authDlg').close();
+$('#authClose').onclick=()=>{if(!locked())$('#authDlg').close()};
+$('#authDlg').addEventListener('cancel',e=>{if(locked())e.preventDefault()});   // Esc / back cannot skip the sign-in screen
 async function authAction(c,btn){
   const msg=t=>{$('#sbMsg').textContent=t};
   const email=$('#sbEmail').value.trim().toLowerCase(),password=$('#sbPass').value;
