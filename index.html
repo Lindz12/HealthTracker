@@ -217,7 +217,7 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute
 'use strict';
 const KEY='weeklyHealthTracker.v1';
 /* ---- Supabase settings: paste your project's values here (see README) ---- */
-const SUPABASE_URL='https://fociporfchsprcvbheye.supabase.co/rest/v1/';      // e.g. 'https://abcdefghijkl.supabase.co'
+const SUPABASE_URL='https://fociporfchsprcvbheye.supabase.co'; // base address only, nothing after .supabase.co
 const SUPABASE_ANON_KEY='sb_publishable_2LCn9nB1RUhvq04YO75jOA_qGC8AonE'; // the "anon public" / publishable key. NEVER the service_role / secret key.
 const LB=2.20462;
 const $=(s,r=document)=>r.querySelector(s);
@@ -350,7 +350,14 @@ function renderCloud(){
 }
 function cloudInit(){
   if(!window.supabase){renderCloud();dbStatus('Could not reach Supabase. Entries are saved on this device.','warn');return}
-  sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+  let base=SUPABASE_URL.trim();
+  try{base=new URL(base).origin}catch(e){}
+  if(!/^https:\/\/[a-z0-9-]+\.supabase\.(co|in)$/i.test(base)){
+    renderCloud();
+    dbStatus('⚠ SUPABASE_URL looks wrong ('+SUPABASE_URL+'). It should look like https://abcdefghijkl.supabase.co','bad');
+    return;
+  }
+  sb=window.supabase.createClient(base,SUPABASE_ANON_KEY.trim());
   dbStatus('Sign in under Profile & data to sync with Supabase. Entries are saved on this device.','warn');
   sb.auth.onAuthStateChange((ev,session)=>{
     const u=session?session.user:null,changed=(u&&u.id)!==(sbUser&&sbUser.id);
